@@ -1,5 +1,5 @@
 #!/bin/bash
-#25/5/26 v4
+#25/5/26 v5
 trap '' HUP  # survive SSH disconnect
 exec > >(tee /config/reset.log) 2>&1
 
@@ -58,6 +58,38 @@ else
   echo "ERROR: CYTECH_SECRETS_TOKEN missing from /config/.cytech_secrets -- DO NOT capture this image: its clones could never set up owner alert email and nothing on a clone can fetch the token afterwards. Add the token line and re-run."
 fi
 
+# 0c. (v5) Strip the master's own owner-specific data so no clone inherits it.
+# The alert-email login and recipient are per-unit values: USER/PASS are
+# refetched from the private repo on each clone's first maintenance pass (the
+# token checked above is what authorises that fetch), and RECIPIENT is written
+# when the new owner presses Register. Shipping the master's values would give
+# every clone the same SMTP login and -- because cytech_alert_mail.py falls
+# back to .cytech_registered when CY_SMTP_RECIPIENT is absent -- send a new
+# owner's alert copies to the master's owner instead. The four fleet-wide
+# lines (TAILSCALE_CLIENT_ID, TAILSCALE_CLIENT_SECRET, CYTECH_MANIFEST_URL,
+# CYTECH_SECRETS_TOKEN) must stay; clones cannot provision without them.
+if [ -f /config/.cytech_secrets ]; then
+  cp -p /config/.cytech_secrets /tmp/.cytech_secrets.strip
+  awk '!/^CY_SMTP_(USER|PASS|RECIPIENT)=/' /tmp/.cytech_secrets.strip > /tmp/.cytech_secrets.new \
+    && cat /tmp/.cytech_secrets.new > /config/.cytech_secrets
+  rm -f /tmp/.cytech_secrets.strip /tmp/.cytech_secrets.new
+  chmod 600 /config/.cytech_secrets
+  echo "Master alert-email credentials/recipient stripped from .cytech_secrets."
+fi
+# Stale copies of that file would otherwise carry the same values past the strip.
+rm -f /config/.cytech_secrets.bak_*
+# Owner identity the alert mailer falls back to; a clone must wait for its own
+# owner to Register. These files (and the logs below) hold the owner's email
+# address in clear.
+rm -f /config/.cytech_registered
+rm -f /config/.cytech_register_result
+rm -f /config/.cytech_register_popup
+rm -f /config/cytech_alerts.log
+rm -f /config/cytech_update.log
+rm -f /config/.cytech_email_activation_armed
+# The restore-state cache still carries input_text.cytech_alert_recipient.
+rm -f /config/.storage/core.restore_state
+
 # 1. Auth and user accounts
 rm -f .storage/auth
 rm -f .storage/auth_provider.homeassistant
@@ -89,9 +121,12 @@ if [ -f "$CE" ]; then
     jq '.data.entries |= map(select(.domain != "mobile_app" and .domain != "google_translate" and .domain != "met"))' "$CE" > "${CE}.tmp" && mv "${CE}.tmp" "$CE"
 fi
 
-# 4. Logs and old database
+# 4. Logs and old database (SQLite sidecars too -- a leftover WAL can still
+# hold recorder rows from before the reset)
 rm -f home-assistant.log
 rm -f home-assistant_v2.db
+rm -f home-assistant_v2.db-wal
+rm -f home-assistant_v2.db-shm
 
 # 5. Clear SSH terminal history
 history -c
@@ -100,10 +135,20 @@ rm -f ~/.bash_history
 # 6. Re-arm the Zero-Touch deployment script
 echo "Resetting Zero-Touch deployment triggers..."
 rm -f /config/.zero_touch_completed
-rm -f /config/.cytech_version
+# Keep /config/.cytech_version. It is the installed version marker, not a
+# zero-touch trigger: with it present, a clone whose image matches the current
+# fleet release reads as up to date and is not offered a same-version update.
+# Erasing it made every clone read v0 and re-download the whole payload, which
+# would also replace this very script with the manifest's copy (v4 while the
+# fleet is still on v57) and undo the strip above.
 rm -f /config/.cytech_update_pending
 rm -f /config/.cytech_notify_pending
 rm -f /config/.cytech_last_result
+# Boot-history counters are master-specific: five or more entries within 24 h
+# would make every clone's first boot read REPEATED_RESTARTS and raise the
+# storage-card alert before the clone has done anything.
+rm -f /config/.cytech_boot_events
+rm -f /config/.cytech_boot_result
 echo "Initializing Secure Link..." > /config/device_id.txt
 rm -f /config/authorized_keys
 rm -rf /config/.ssh

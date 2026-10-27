@@ -210,6 +210,7 @@ if os.path.exists(cfg):
         problems.append(f"configuration.yaml: {type(e).__name__}: {e}")
 
 storage_dir = '/config/.storage'
+skipped = []
 if os.path.isdir(storage_dir):
     for name in sorted(os.listdir(storage_dir)):
         # HA's own storage helper already quarantines files it finds corrupt
@@ -223,8 +224,24 @@ if os.path.isdir(storage_dir):
         path = os.path.join(storage_dir, name)
         if not os.path.isfile(path):
             continue
+        # v58: not every file here is HA's JSON store. The androidtv_remote
+        # integration writes androidtv_remote_cert.pem / _key.pem (PEM
+        # armour, not JSON); json.load() on healthy content raised
+        # JSONDecodeError and mailed a false "SD card data integrity" alert
+        # (cytech-8, 2026-10-25). Cert/key companions can never be JSON, so
+        # name-guard them; for anything else, sniff the first bytes and only
+        # parse what actually looks like a JSON document.
+        if name.lower().endswith(('.pem', '.key', '.crt', '.cer', '.der',
+                                  '.p12', '.pfx')):
+            skipped.append(name)
+            continue
         try:
             with open(path, 'rb') as f:
+                head = f.read(64)
+                if b'-----BEGIN' in head:
+                    skipped.append(name)
+                    continue
+                f.seek(0)
                 json.load(f)
         except Exception as e:
             problems.append(f".storage/{name}: {type(e).__name__}: {e}")
@@ -233,6 +250,10 @@ if problems:
     print("CORRUPT")
     for p in problems[:10]:
         print(p)
+elif skipped:
+    print("OK")
+    print("SKIPPED %d non-JSON companion file(s) in .storage: %s"
+          % (len(skipped), ", ".join(skipped[:10])))
 else:
     print("OK")
 PYEOF
@@ -248,7 +269,12 @@ PYEOF
     # Only restore when the snapshot itself parses, so corruption in the
     # snapshot can never cause a restore loop.
     CONFIG_RESTORED=0
-    RESTORED_NOTE=" The system could not self-repair: no usable snapshot of configuration.yaml exists on this device."
+    # v58: only claim "could not self-repair" when configuration.yaml is
+    # actually among the broken files. The old wording was a default applied
+    # to ANY problem, so a harmless .storage finding told the owner the
+    # config was unrecoverable even though it had parsed fine (cytech-8,
+    # 2026-10-25).
+    RESTORED_NOTE=""
     if echo "$DETAILS" | grep -q "configuration.yaml"; then
       if [ -f /config/.cytech_snapshot/configuration.yaml ] && \
          python3 - << 'PYEOF'
@@ -274,13 +300,15 @@ PYEOF
         CONFIG_RESTORED=1
         RESTORED_NOTE=" configuration.yaml is the broken file and WAS restored from the last known-good snapshot (the broken copy is saved as configuration.yaml.corrupt.<timestamp>); the system restarted to load the recovered config. The card is showing the same failure signature as the last corruption incidents -- check the device soon."
         echo "configuration.yaml was corrupt -- restored from snapshot."
+      else
+        RESTORED_NOTE=" The system could not self-repair: no usable snapshot of configuration.yaml exists on this device."
       fi
     fi
     jq -n --arg ts "$(date +%s)" \
       --arg msg "Data integrity issue detected on this device's SD card: ${DETAILS}${RESTORED_NOTE}" \
       '{ts: $ts, message: $msg}' > /config/.cytech_integrity_alert
   else
-    echo "Integrity check OK: configuration.yaml and .storage/* all parse correctly."
+    echo "Integrity check OK: configuration.yaml and all JSON .storage files parse correctly."
     rm -f /config/.cytech_integrity_alert
     ensure_config_snapshot
   fi
@@ -1677,18 +1705,66 @@ PYEOF
 # deliberately NOT routed through restart_core_planned() -- repeated
 # corruption is itself a real signal worth keeping in the count.
 record_boot_event() {
+  # v58: first_boot.sh also runs on operator-triggered maintenance passes
+  # while Core has been up for hours (the fleet sweep calls
+  # shell_command.init_first_boot to seed email credentials). Those are not
+  # restarts, but every one used to append a boot event -- enough of them in
+  # a day tripped "Repeated Restarts" on a healthy unit (cytech-11, 2026-10).
+  #
+  # Every Core run is identified by the host's boot_id plus the start time of
+  # the Home Assistant process itself, read from /proc. The Home Assistant
+  # process is found by walking up the parent chain from this shell: a
+  # shell_command always runs as a descendant of it. The first pass of a
+  # session records that identity in .cytech_boot_accounted; any later pass
+  # in the same session sees the same identity and does nothing. This
+  # deliberately does NOT use a timestamp written by an HA automation: the
+  # startup automation that calls first_boot and any packages automation both
+  # fire on the same homeassistant.start event, so their execution order is
+  # not guaranteed -- if first_boot ran first it would read a stale stamp and
+  # fail to count a genuine restart. Process start time is monotonic (immune
+  # to clock jumps), and a Core restart gives a new Home Assistant process
+  # whether Supervisor restarts the whole container or only the process
+  # inside it.
+  #
+  # Running this script by hand inside the SSH addon is always a maintenance
+  # pass (the addon's own processes are not Core), so it is ignored outright.
+  if [ ! -d /usr/src/homeassistant ]; then
+    echo "Maintenance pass (SSH addon context) -- not counted toward Repeated Restarts."
+    return 0
+  fi
+  local SESSION TICKS BOOTID ACCOUNTED CORE_PID CMD
+  CORE_PID=$$
+  while [ -n "$CORE_PID" ] && [ "$CORE_PID" -gt 1 ] 2>/dev/null; do
+    CMD=$(tr '\0' ' ' < "/proc/$CORE_PID/cmdline" 2>/dev/null)
+    case "$CMD" in
+      *"-m homeassistant"*) break ;;
+    esac
+    CORE_PID=$(awk '{print $4}' "/proc/$CORE_PID/stat" 2>/dev/null)
+    case "$CORE_PID" in ''|*[!0-9]*) CORE_PID="" ;; esac
+  done
+  case "$CORE_PID" in ''|0|*[!0-9]*) CORE_PID=1 ;; esac
+  TICKS=$(cut -d' ' -f22 "/proc/$CORE_PID/stat" 2>/dev/null)
+  BOOTID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+  case "$TICKS" in ''|*[!0-9]*) TICKS="" ;; esac
+  [ -n "$TICKS" ] && SESSION="${BOOTID:-unknown}:${TICKS}"
+  ACCOUNTED=$(head -n1 /config/.cytech_boot_accounted 2>/dev/null)
+  if [ -n "$SESSION" ] && [ "$ACCOUNTED" = "$SESSION" ]; then
+    echo "Core start already accounted for (${SESSION}) -- maintenance pass not counted toward Repeated Restarts."
+    return 0
+  fi
   if [ -f /config/.cytech_planned_restart ]; then
     rm -f /config/.cytech_planned_restart
     echo "Planned restart (update/register/maintenance) -- not counted toward Repeated Restarts."
-    return 0
-  fi
-  if [ -f /config/.cytech_boot_events ]; then
-    if [ "$(wc -l < /config/.cytech_boot_events)" -gt 500 ]; then
-      tail -n 500 /config/.cytech_boot_events > /config/.cytech_boot_events.tmp 2>/dev/null \
-        && mv /config/.cytech_boot_events.tmp /config/.cytech_boot_events
+  else
+    if [ -f /config/.cytech_boot_events ]; then
+      if [ "$(wc -l < /config/.cytech_boot_events)" -gt 500 ]; then
+        tail -n 500 /config/.cytech_boot_events > /config/.cytech_boot_events.tmp 2>/dev/null \
+          && mv /config/.cytech_boot_events.tmp /config/.cytech_boot_events
+      fi
     fi
+    date +%s >> /config/.cytech_boot_events 2>/dev/null || true
   fi
-  date +%s >> /config/.cytech_boot_events 2>/dev/null || true
+  [ -n "$SESSION" ] && echo "$SESSION" > /config/.cytech_boot_accounted 2>/dev/null || true
 }
 
 restart_core_planned() {
@@ -1713,15 +1789,24 @@ if os.path.exists(F):
             line = line.strip()
             if line.isdigit():
                 events.append(int(line))
-recent = [e for e in events if now - e < 86400]
+recent = sorted(e for e in events if now - e < 86400)
 status = 'OK'
 message = 'OK: %d HA restarts in the last 24h' % len(recent)
 if len(recent) >= 5:
     status = 'REPEATED_RESTARTS'
-    message = ('The unit restarted %d times in the last 24h (first at %s local). '
+    # v58: list the restart times, not just the first one -- the previous
+    # wording made every alert an investigation ("which five, and were any
+    # of them ours?"). Cap at 12 entries so a genuine crash loop cannot
+    # produce an unbounded message.
+    stamps = [time.strftime('%d %b %H:%M:%S', time.localtime(e))
+              for e in recent]
+    if len(stamps) > 12:
+        shown = ', '.join(stamps[:12]) + ', and %d more' % (len(stamps) - 12)
+    else:
+        shown = ', '.join(stamps)
+    message = ('The unit restarted %d times in the last 24h (local times: %s). '
                'Repeated restarts usually mean a problem -- please contact '
-               'Cytech Support.') % (
-        len(recent), time.strftime('%H:%M:%S', time.localtime(min(recent))))
+               'Cytech Support.') % (len(recent), shown)
 with open(O, 'w') as f:
     json.dump({'ts': now, 'status': status, 'message': message}, f)
 print(message)

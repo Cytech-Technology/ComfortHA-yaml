@@ -496,8 +496,12 @@ automation:
       # corruption is repaired minutes after start, not hours later.
       - platform: homeassistant
         event: start
+      # v58: "/4" is every 4th hour. The bare 4 this replaces matched only
+      # hour 4 (minutes default to 0), i.e. once a day at 04:00, not every
+      # four hours, so the "4-hourly" health check had quietly become daily
+      # on every unit.
       - platform: time_pattern
-        hours: 4
+        hours: "/4"
     action:
       - service: shell_command.cytech_integrity_check
 
@@ -789,6 +793,20 @@ automation:
              or is_state('update.home_assistant_core', 'on')
              or is_state('update.home_assistant_supervisor_update', 'on')
              or is_state('update.home_assistant_supervisor', 'on') }}
+      # v58: the integrity trigger above has no `to:`, so it also fires when
+      # the alert CLEARS -- and the update-offer condition alone was still
+      # true, which mailed "do not install the update" a second time just as
+      # the card problem went away (cytech-13, 2026-10-26: one false alert
+      # produced three mails). Require a trouble source to be reporting RIGHT
+      # NOW; the expression is deliberately the same one
+      # binary_sensor.cytech_sd_trouble uses, read from the source sensors so
+      # it cannot lag behind the trigger.
+      - condition: template
+        value_template: >-
+          {{ states('sensor.cytech_sd_card_status') == 'FAIL'
+             or states('sensor.cytech_sd_canary') == 'FAIL'
+             or states('sensor.cytech_warning') == 'REPEATED_RESTARTS'
+             or states('sensor.cytech_integrity_alert') not in ['', 'unknown', 'unavailable'] }}
     action:
       - service: script.cytech_update_hold_notify
 
