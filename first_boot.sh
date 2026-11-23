@@ -2204,7 +2204,7 @@ PYEOF
 }
 
 # v59: true when an installed Comfort add-on is at least the given dotted
-# version (e.g. "1.0.11"). Reads the version from Supervisor, which is the
+# version (e.g. "1.1.0"). Reads the version from Supervisor, which is the
 # authoritative installed one -- a manifest/repository tag can be newer than
 # what is actually running.
 #
@@ -2247,7 +2247,7 @@ EOF
 }
 
 # v59: the Control dashboard depends on MQTT discovery published by Comfort
-# add-on 1.0.11+, so its dashboard entry and card resource are managed here
+# add-on 1.1.0+, so its dashboard entry and card resource are managed here
 # rather than in the ensure_yaml_dashboards() heredoc -- that block is only
 # written when `lovelace:` is absent, and every fleet unit already has it.
 #
@@ -2259,7 +2259,7 @@ EOF
 # Returns 1 if either file changed (caller restarts HA so they load).
 ensure_control_dashboard() {
   local CFG=/config/configuration.yaml CHANGED=0 RESULT
-  addon_version_at_least 1.0.11 || return 0
+  addon_version_at_least 1.1.0 || return 0
   if ! grep -q 'filename: dashboards/home_control.yaml' "$CFG" 2>/dev/null; then
     if grep -q '^  dashboards:' "$CFG" 2>/dev/null; then
       awk '
