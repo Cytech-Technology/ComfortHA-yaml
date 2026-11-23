@@ -2204,21 +2204,18 @@ PYEOF
 }
 
 # v59: true when an installed Comfort add-on is at least the given dotted
-# version (e.g. "1.1.0"). Reads the version from Supervisor, which is the
+# version (e.g. "1.0.11"). Reads the version from Supervisor, which is the
 # authoritative installed one -- a manifest/repository tag can be newer than
 # what is actually running.
 #
-# The installed slug is <repository-hash>_cytech_comfort_mqtt, and the hash
-# depends on which repository supplied it: production ucmpi4 installs as
-# 11e1169e_cytech_comfort_mqtt, the dev repository as 4a8c4014_... . Match on
-# the suffix instead of hardcoding one hash, and succeed when any installed
-# Comfort add-on meets the version (a unit may carry both side by side).
+# The installed slug is <repository-hash>_cytech_comfort_mqtt; match on the
+# suffix so the repository hash is not hardcoded, and succeed when any
+# installed Comfort add-on meets the version (a unit may carry more than one).
 #
 # Deliberately NOT ver_newer() (above): that strips separators and
-# concatenates the digits, so 1.0.12 -> 1012 would wrongly outrank 1.2.0 ->
-# 120. Compare dot-separated numeric components instead. A pre-release
-# suffix ("1.1.0-dev6") is ignored here: such a build still carries the Home
-# Control feature this gate protects.
+# concatenates the digits, so 1.0.11 -> 1011 would wrongly outrank 1.2.0 ->
+# 120. Compare dot-separated numeric components instead; any non-numeric
+# suffix is stripped first.
 addon_version_at_least() {
   local want="$1" have
   local versions
@@ -2250,19 +2247,19 @@ EOF
 }
 
 # v59: the Control dashboard depends on MQTT discovery published by Comfort
-# add-on 1.1.0+, so its dashboard entry and card resource are managed here
+# add-on 1.0.11+, so its dashboard entry and card resource are managed here
 # rather than in the ensure_yaml_dashboards() heredoc -- that block is only
 # written when `lovelace:` is absent, and every fleet unit already has it.
 #
 # Both edits are idempotent and this runs on every maintenance pass:
 # updating an add-on restarts only the add-on container, not HA Core, and
 # does not bump .cytech_version. A one-shot v59 migration would therefore
-# skip forever on a unit that took v59 while still on 1.0.11; the every-boot
-# gate converges at the next Core restart once the add-on is new enough.
+# skip forever on a unit that took v59 while its add-on was still older; the
+# every-boot gate converges at the next Core restart once it is new enough.
 # Returns 1 if either file changed (caller restarts HA so they load).
 ensure_control_dashboard() {
   local CFG=/config/configuration.yaml CHANGED=0 RESULT
-  addon_version_at_least 1.1.0 || return 0
+  addon_version_at_least 1.0.11 || return 0
   if ! grep -q 'filename: dashboards/home_control.yaml' "$CFG" 2>/dev/null; then
     if grep -q '^  dashboards:' "$CFG" 2>/dev/null; then
       awk '
