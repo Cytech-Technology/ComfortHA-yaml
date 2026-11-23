@@ -2203,6 +2203,128 @@ PYEOF
   return $CHANGED
 }
 
+# v59: true when an installed Comfort add-on is at least the given dotted
+# version (e.g. "1.1.0"). Reads the version from Supervisor, which is the
+# authoritative installed one -- a manifest/repository tag can be newer than
+# what is actually running.
+#
+# The installed slug is <repository-hash>_cytech_comfort_mqtt, and the hash
+# depends on which repository supplied it: production ucmpi4 installs as
+# 11e1169e_cytech_comfort_mqtt, the dev repository as 4a8c4014_... . Match on
+# the suffix instead of hardcoding one hash, and succeed when any installed
+# Comfort add-on meets the version (a unit may carry both side by side).
+#
+# Deliberately NOT ver_newer() (above): that strips separators and
+# concatenates the digits, so 1.0.12 -> 1012 would wrongly outrank 1.2.0 ->
+# 120. Compare dot-separated numeric components instead. A pre-release
+# suffix ("1.1.0-dev6") is ignored here: such a build still carries the Home
+# Control feature this gate protects.
+addon_version_at_least() {
+  local want="$1" have
+  local versions
+  versions=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    http://supervisor/addons 2>/dev/null \
+    | jq -r '.data.addons[]? | select(.slug | endswith("_cytech_comfort_mqtt")) | .version // empty' 2>/dev/null)
+  [ -n "$versions" ] || return 1
+  while IFS= read -r have; do
+    [ -n "$have" ] || continue
+    if awk -v have="$have" -v want="$want" 'BEGIN {
+      sub(/[^0-9.].*$/, "", have)
+      sub(/[^0-9.].*$/, "", want)
+      n = split(have, h, "."); m = split(want, w, ".")
+      max = n > m ? n : m
+      for (i = 1; i <= max; i++) {
+        a = (i <= n && h[i] != "") ? h[i] + 0 : 0
+        b = (i <= m && w[i] != "") ? w[i] + 0 : 0
+        if (a > b) exit 0
+        if (a < b) exit 1
+      }
+      exit 0
+    }'; then
+      return 0
+    fi
+  done <<EOF
+$versions
+EOF
+  return 1
+}
+
+# v59: the Control dashboard depends on MQTT discovery published by Comfort
+# add-on 1.1.0+, so its dashboard entry and card resource are managed here
+# rather than in the ensure_yaml_dashboards() heredoc -- that block is only
+# written when `lovelace:` is absent, and every fleet unit already has it.
+#
+# Both edits are idempotent and this runs on every maintenance pass:
+# updating an add-on restarts only the add-on container, not HA Core, and
+# does not bump .cytech_version. A one-shot v59 migration would therefore
+# skip forever on a unit that took v59 while still on 1.0.11; the every-boot
+# gate converges at the next Core restart once the add-on is new enough.
+# Returns 1 if either file changed (caller restarts HA so they load).
+ensure_control_dashboard() {
+  local CFG=/config/configuration.yaml CHANGED=0 RESULT
+  addon_version_at_least 1.1.0 || return 0
+  if ! grep -q 'filename: dashboards/home_control.yaml' "$CFG" 2>/dev/null; then
+    if grep -q '^  dashboards:' "$CFG" 2>/dev/null; then
+      awk '
+        { print }
+        !done && /^  dashboards:[[:space:]]*$/ {
+          print "    comfort-home-control:"
+          print "      mode: yaml"
+          print "      title: Control"
+          print "      icon: mdi:home-automation"
+          print "      show_in_sidebar: true"
+          print "      require_admin: false"
+          print "      filename: dashboards/home_control.yaml"
+          done = 1
+        }
+      ' "$CFG" > "${CFG}.tmp" && mv "${CFG}.tmp" "$CFG"
+      CHANGED=1
+      echo "Control dashboard registered in configuration.yaml"
+    else
+      echo "Control dashboard skipped: no lovelace dashboards block found"
+    fi
+  fi
+  # The card is a frontend module, so it must be listed in the Lovelace
+  # resource registry. Storage mode keeps that list in .storage; HA caches it
+  # in memory, so the caller's Core restart is what actually makes it load.
+  # Any existing entry for this file is reused (and cache-busted) instead of
+  # appended, so a unit that already carries it never gets a duplicate.
+  RESULT=$(python3 - <<'PYEOF'
+import json, os, uuid
+p = '/config/.storage/lovelace_resources'
+url = '/local/comfort-home-control-card.js?v=59'
+changed = False
+if os.path.exists(p):
+    with open(p) as f:
+        d = json.load(f)
+    items = d.setdefault('data', {}).setdefault('items', [])
+    entry = next((i for i in items
+                  if i.get('url', '').startswith('/local/comfort-home-control-card.js')), None)
+    if entry is None:
+        items.append({'id': uuid.uuid4().hex, 'url': url, 'type': 'module'})
+        changed = True
+    elif entry.get('url') != url:
+        entry['url'] = url
+        changed = True
+    if changed:
+        with open(p, 'w') as f:
+            json.dump(d, f, indent=4)
+else:
+    d = {'version': 1, 'minor_version': 1, 'key': 'lovelace_resources',
+         'data': {'items': [{'id': uuid.uuid4().hex, 'url': url, 'type': 'module'}]}}
+    with open(p, 'w') as f:
+        json.dump(d, f, indent=4)
+    changed = True
+print('CHANGED' if changed else 'OK')
+PYEOF
+)
+  if [ "$RESULT" = "CHANGED" ]; then
+    CHANGED=1
+    echo "Control card resource registered in lovelace_resources"
+  fi
+  return $CHANGED
+}
+
 # v54: Tailscale probes for the fake-provisioned detector below. Both run the
 # request inside the Advanced SSH addon: the Core container's Supervisor token
 # returns 401 on some units (office, 2026-10-02), while the addon's works, and
@@ -2258,6 +2380,12 @@ if [ -f /config/.zero_touch_completed ]; then
   ensure_yaml_dashboards
   if [ $? -eq 1 ]; then
     echo "YAML dashboard config changed — restarting HA to load it."
+    restart_core_planned
+    exit 0
+  fi
+  ensure_control_dashboard
+  if [ $? -eq 1 ]; then
+    echo "Control dashboard config changed — restarting HA to load it."
     restart_core_planned
     exit 0
   fi
@@ -2394,6 +2522,7 @@ fi
 
 ensure_resilient_dns
 ensure_yaml_dashboards
+ensure_control_dashboard
 
 # 2. Smartly grab the MAC address from the physical port
 if [ -f /sys/class/net/end0/address ]; then
