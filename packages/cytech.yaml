@@ -391,12 +391,18 @@ command_line:
       # states
       # feed the alert automations below. Files are written on every HA start
       # by cytech_start_health_checks.
+      #
+      # v61: "ts" (the result file's write time) is exposed alongside it so
+      # the pre-ship harness can tell a fresh check from the master image's
+      # cloned old "OK" and wait for the former -- the same staleness rule it
+      # already uses for the HDMI/USB sensors.
       name: "Cytech SD Card Status"
       unique_id: cytech_sdcard_result_sensor
       command: "cat /config/.cytech_sdcard_result 2>/dev/null || echo '{}'"
       value_template: "{{ value_json.status | default('') }}"
       json_attributes:
         - message
+        - ts
       scan_interval: 60
   - sensor:
       name: "Cytech SD Canary"
@@ -405,6 +411,7 @@ command_line:
       value_template: "{{ value_json.status | default('') }}"
       json_attributes:
         - message
+        - ts
       scan_interval: 60
   - sensor:
       # v42f: renamed from 'Cytech Boot Status' -- this row will carry other
@@ -809,6 +816,50 @@ automation:
              or states('sensor.cytech_integrity_alert') not in ['', 'unknown', 'unavailable'] }}
     action:
       - service: script.cytech_update_hold_notify
+
+  # v61: the Control dashboard gate in first_boot.sh is evaluated only when
+  # first_boot runs, and that is only on an HA Core start (the "System: First
+  # Boot Initialization" automation on homeassistant/start). Updating the
+  # Comfort app restarts only the add-on container, so a unit that applies the
+  # config files first and updates the app afterwards keeps the Control page
+  # out of the sidebar until the next HA restart -- cytechoffice did exactly
+  # that on 2026-11-23 (app 1.1.0 started at 12:09, after the 12:05 Core start
+  # whose pass still read 1.0.11). Watch the Comfort add-on's own update
+  # entity and run the same first_boot pass on a real version change;
+  # first_boot still owns the >= 1.1.0 decision, so an app update below the
+  # gate does nothing.
+  #
+  # Match by event, not by entity id: add-on update entity ids pin at first
+  # registration (v42b) and vary by unit, while the add-on's title attribute
+  # is stable. old_state-exists + installed_version-changed keep this silent
+  # on every Core start (entities are re-added with old_state null and later
+  # attribute refreshes do not change the installed version), so it cannot
+  # race the HA-start pass into two concurrent configuration.yaml writers.
+  # Several state_changed events can belong to one install; mode: single with
+  # max_exceeded: silent collapses the burst into one run.
+  - id: cytech_control_dashboard_after_app_update
+    alias: "Cytech: Add Control page after Comfort app update"
+    mode: single
+    max_exceeded: silent
+    trigger:
+      - platform: event
+        event_type: state_changed
+    condition:
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.entity_id.startswith('update.')
+             and trigger.event.data.old_state is not none
+             and trigger.event.data.new_state is not none
+             and (trigger.event.data.new_state.attributes.title | default('')) == 'Cytech Comfort'
+             and (trigger.event.data.old_state.attributes.installed_version | default('')) !=
+                 (trigger.event.data.new_state.attributes.installed_version | default(''))
+             and (trigger.event.data.new_state.attributes.installed_version | default(''))
+                 not in ['', 'unknown', 'unavailable'] }}
+    action:
+      # Let Supervisor finish recording the install and starting the add-on
+      # before first_boot reads the add-on list.
+      - delay: "00:00:20"
+      - service: shell_command.init_first_boot
 
 # v34: MQTT sensor backing the System Status card in dashboards/alarm.yaml.
 # Reads the raw panel status word from cytech_comfort_mqtt/alarm (the same
