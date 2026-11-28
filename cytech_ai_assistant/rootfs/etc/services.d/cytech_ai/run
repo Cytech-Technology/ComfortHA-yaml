@@ -1,0 +1,18 @@
+#!/usr/bin/with-contenv bashio
+set -e
+
+APP="/app/server.py"
+
+if [ ! -f "$APP" ]; then
+  bashio::log.error "AI assistant entrypoint not found: $APP"
+  exit 1
+fi
+
+bashio::log.info "Starting Cytech AI Assistant on :8099"
+
+# Do not echo option values here; the installation token must never reach logs.
+if [ ! -s /data/options.json ]; then
+  bashio::log.warning "No add-on options found; the assistant will show a setup notice."
+fi
+
+exec python3 -u "$APP"

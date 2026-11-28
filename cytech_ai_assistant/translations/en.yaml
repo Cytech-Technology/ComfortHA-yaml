@@ -1,0 +1,17 @@
+configuration:
+  proxy_url:
+    name: AI service address
+    description: >-
+      The Cytech AI service used for answers. Leave this at the default unless
+      Cytech support asks you to change it.
+  installation_token:
+    name: Installation token
+    description: >-
+      The token supplied by Cytech or your installer. It identifies this
+      installation to the AI service and is used for usage limits. Paste it
+      exactly as supplied; it is stored in the add-on configuration.
+  model:
+    name: AI model
+    description: >-
+      Sonnet 5.5 gives the best answers for troubleshooting. Haiku 4.5 is
+      faster and uses less of the monthly allowance but is less thorough.

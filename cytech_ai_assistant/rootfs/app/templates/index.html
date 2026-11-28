@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cytech AI Assistant</title>
+  <link rel="stylesheet" href="{{ base }}/static/styles.css">
+  <script src="{{ base }}/static/app.js" defer></script>
+</head>
+{% set model_label = 'Haiku 4.5' if model == 'claude-haiku-4-5' else 'Sonnet 5.5' %}
+<body
+  data-base="{{ base }}"
+  data-model="{{ model }}"
+  data-configured="{{ '1' if configured else '0' }}"
+  data-ha-configured="{{ '1' if ha_configured else '0' }}">
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="7" width="16" height="12" rx="4"></rect>
+            <path d="M12 3v4"></path>
+            <circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"></circle>
+            <circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"></circle>
+            <path d="M9.2 16.2c1.7.9 3.9.9 5.6 0"></path>
+          </svg>
+        </span>
+        <div class="brand-text">
+          <h1>Cytech AI Assistant</h1>
+          <p class="subtitle">
+            Read-only help for your Comfort system
+            <span class="model-pill">{{ model_label }}</span>
+          </p>
+        </div>
+      </div>
+      <button id="reset" class="ghost-button" type="button">New chat</button>
+    </header>
+
+    <div id="setup-banner" class="banner banner-warning" hidden></div>
+
+    <div id="first-run" class="banner banner-info" hidden>
+      <p>
+        Answers come from an AI service that can read this Home Assistant. Never
+        type passwords, alarm codes, remote-access links, or anything from
+        <code>cytech_secrets</code> into this chat.
+      </p>
+      <button id="dismiss-notice" class="ghost-button" type="button">Got it</button>
+    </div>
+
+    <main id="conversation" class="conversation">
+      <section id="welcome" class="welcome">
+        <h2>How can I help?</h2>
+        <p>
+          Ask about your Comfort alarm, zones, battery, or system health. I can
+          read the current state and logs of this Home Assistant, but I cannot
+          change anything.
+        </p>
+        <div class="suggestions">
+          <button type="button" class="suggestion">Is my alarm in trouble?</button>
+          <button type="button" class="suggestion">Which zones are open?</button>
+          <button type="button" class="suggestion">How is my system health?</button>
+          <button type="button" class="suggestion">What does "disarmed" mean if the panel shows Trouble?</button>
+        </div>
+      </section>
+      <div id="messages" class="messages" aria-live="polite"></div>
+    </main>
+
+    <div id="activity" class="activity" hidden>
+      <span class="spinner" aria-hidden="true"></span>
+      <span id="activity-text"></span>
+    </div>
+
+    <footer class="composer">
+      <form id="chat-form" autocomplete="off">
+        <textarea id="input" rows="1" maxlength="4000"
+                  placeholder="Ask about your Comfort system…"
+                  aria-label="Your question"></textarea>
+        <button id="send" class="send-button" type="submit">Send</button>
+        <button id="stop" class="stop-button" type="button" hidden>Stop</button>
+      </form>
+      <div class="meta">
+        <span id="usage" class="usage" hidden></span>
+        <span class="disclaimer">
+          AI answers can be wrong. Never enter passwords, alarm codes, or
+          remote-access links.
+        </span>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>
